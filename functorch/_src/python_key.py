@@ -72,6 +72,7 @@ class PythonTensor(torch.Tensor):
         func = func_overload.overloadpacket
         if func_overload in CURRENT_DECOMPOSITION_TABLE:
             return CURRENT_DECOMPOSITION_TABLE[func_overload](*args, **kwargs)
+
         # Commenting this out for now since it causes some spurious failures (such as error checking)
         # if func == aten._local_scalar_dense:
         #     raise RuntimeError("It appears that you're trying to get value out of a tracing tensor - erroring out! "
@@ -104,6 +105,7 @@ class PythonTensor(torch.Tensor):
                 return PythonTensor(e, proxy)
             else:
                 return e
+
         if isinstance(real_out, tuple):
             return tuple([wrap_with_proxy(e, proxy_out[idx]) for idx, e in enumerate(real_out)])
         elif isinstance(real_out, list):
@@ -119,7 +121,7 @@ class PythonKeyTracer(Tracer):
         super().__init__()
 
     def call_module(
-        self, m: torch.nn.Module, forward: Callable[..., Any], args: Tuple[Any, ...], kwargs: Dict[str, Any]
+            self, m: torch.nn.Module, forward: Callable[..., Any], args: Tuple[Any, ...], kwargs: Dict[str, Any]
     ) -> Any:
         return forward(*args, **kwargs)
 
@@ -153,12 +155,36 @@ class PythonKeyTracer(Tracer):
                     i += 1
                 setattr(self.root, qualname, a)
 
-            return self.create_node('get_attr', qualname, (), {})
+                node = self.create_node('get_attr', qualname, (), {})
+                # print("node.args",node.args)
+                node.meta["tensor_meta"] = _extract_tensor_metadata(a)
+                # print("node.metametameta",node.meta)
+                return node  # self.create_node('get_attr', qualname, (), {})
+
+        if isinstance(a, torch.Tensor):
+            qualname: Optional[str] = self.tensor_attrs.get(a)
+
+            # Tensor was not found in the Module hierarchy, stow it away in a
+            # special attribute and set the qualname to refer to that
+            if not qualname:
+                i = 0
+                while True:
+                    qualname = f'_tensor_constant{i}'
+                    if not hasattr(self.root, qualname):
+                        break
+                    i += 1
+                self.tensor_attrs[a] = qualname
+                setattr(self.root, qualname, a)
+                node = self.create_node('get_attr', qualname, (), {})
+                # print("node.args",node.args)
+                node.meta["tensor_meta"] = _extract_tensor_metadata(a)
+                # print("node.metametameta",node.meta)
+                return node  # self.create_node('get_attr', qualname, (), {})
         return super().create_arg(a)
 
 
 def pythonkey_trace(
-    root: Union[torch.nn.Module, Callable], concrete_args: Optional[Dict[str, Any]] = None
+        root: Union[torch.nn.Module, Callable], concrete_args: Optional[Dict[str, Any]] = None
 ) -> GraphModule:
     tracer = PythonKeyTracer()
     graph = tracer.trace(root, concrete_args)
@@ -172,7 +198,7 @@ def wrap_key(f, inps):
     @functools.wraps(f)
     def wrapped(*args):
         flat_args, args_spec = pytree.tree_flatten(args)
-        assert(len(flat_args) == len(flat_inps))
+        assert (len(flat_args) == len(flat_inps))
         for idx, arg in enumerate(flat_args):
             if isinstance(flat_inps[idx], torch.Tensor):
                 flat_args[idx] = PythonTensor(flat_inps[idx], arg)
